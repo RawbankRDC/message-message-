@@ -863,7 +863,7 @@ button:disabled{cursor:not-allowed}
 
   <div class="balance">
     <div class="card"><small>Solde disponible</small><strong id="balance">0 FC</strong></div>
-    <div class="card"><small>Total enregistré</small><strong id="totalInvested">0 FC</strong></div>
+    <div class="card"><small>Total investi</small><strong id="totalInvested">0 FC</strong></div>
   </div>
 
   <div class="actions">
@@ -1402,7 +1402,7 @@ button:disabled{cursor:not-allowed}
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
   import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, updatePassword } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
-  import { getFirestore, doc, setDoc, getDoc, updateDoc, deleteField, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+  import { getFirestore, doc, setDoc, getDoc, updateDoc, deleteField, collection, query, where, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyA4bR9vwSryzwfRv0v65orBh6XW4rZHPec",
@@ -1418,6 +1418,38 @@ button:disabled{cursor:not-allowed}
   const app = initializeApp(firebaseConfig);
   const auth = getAuth(app);
   const db = getFirestore(app);
+  let stopUserRealtimeSync = null;
+  window.startUserRealtimeSync = function(phone){
+    try{
+      if(stopUserRealtimeSync) stopUserRealtimeSync();
+      stopUserRealtimeSync = onSnapshot(doc(db, "users", phone), async snap => {
+        if(!snap.exists()){
+          stopUserRealtimeSync?.();
+          stopUserRealtimeSync = null;
+          localStorage.removeItem('investRdcUser');
+          try{ await signOut(auth); }catch(e){}
+          alert('Votre profil a été supprimé par l’administration.');
+          if(typeof logout === 'function') logout();
+          return;
+        }
+        const fresh = snap.data();
+        if(fresh.isActive === false){
+          localStorage.setItem('investRdcUser', JSON.stringify(fresh));
+          alert('Votre compte a été bloqué par l’administration.');
+          try{ await signOut(auth); }catch(e){}
+          if(typeof logout === 'function') logout();
+          return;
+        }
+        localStorage.setItem('investRdcUser', JSON.stringify(fresh));
+        try{
+          await syncApprovedDeposits();
+          checkDailyEarnings();
+          updateDashboardUI();
+        }catch(e){ console.error('Synchronisation utilisateur:', e); }
+      });
+    }catch(e){ console.error('Realtime Firebase:', e); }
+  };
+
 
   let selectedPlanData = { name: '', amount: 0, dailyGain: 0 };
   let currentForgotPhone = '';
@@ -2001,6 +2033,7 @@ button:disabled{cursor:not-allowed}
   window.enterDashboard = async function(){
    let u = getUserData();
    if(!u.phone) return;
+   startUserRealtimeSync(u.phone);
 
    try {
      const docSnap = await getDoc(doc(db, "users", u.phone));
@@ -2065,6 +2098,52 @@ button:disabled{cursor:not-allowed}
    }
   }
 
+  // Solde disponible = uniquement revenus d'équipe + revenus des produits,
+  // moins les retraits déjà demandés (en attente ou approuvés).
+  // Le capital investi, les dépôts et le bonus de bienvenue ne sont jamais comptés ici.
+  function calculateAvailableIncome(u){
+    u = normalizeUserData(u);
+    let teamIncome = 0;
+    let productIncome = 0;
+
+    u.transactions.forEach(tx => {
+      const type = String(tx.type || '').toLowerCase();
+      const amount = Number(tx.amount || 0);
+      if(!Number.isFinite(amount) || amount <= 0) return;
+
+      // Revenus d'équipe : commissions N1, N2 et N3 uniquement.
+      if(type.includes('commission n1') || type.includes('commission n2') || type.includes('commission n3')){
+        if(tx.status !== 'Rejeté') teamIncome += amount;
+        return;
+      }
+
+      // Revenus produits : gains quotidiens uniquement.
+      if(type.includes('gain quotidien')){
+        if(tx.status !== 'Rejeté') productIncome += amount;
+      }
+    });
+
+    // Les retraits en attente ont déjà été soustraits du balance utilisateur.
+    // On les soustrait aussi de l'affichage disponible. Les retraits refusés sont ignorés
+    // car l'administration les a remboursés.
+    let withdrawals = 0;
+    u.transactions.forEach(tx => {
+      const type = String(tx.type || '').toLowerCase();
+      const amount = Number(tx.amount || 0);
+      const status = String(tx.status || '').toLowerCase();
+      if(type.includes('retrait') && amount > 0 && status !== 'rejeté' && status !== 'refusé'){
+        withdrawals += amount;
+      }
+    });
+
+    return {
+      teamIncome,
+      productIncome,
+      withdrawals,
+      available: Math.max(0, teamIncome + productIncome - withdrawals)
+    };
+  }
+
   window.updateDashboardUI = function(){
    const u = getUserData();
    if(u.isActive === false){
@@ -2073,7 +2152,8 @@ button:disabled{cursor:not-allowed}
      return;
    }
 
-   document.getElementById('balance').textContent = u.balance.toLocaleString() + ' FC';
+   const income = calculateAvailableIncome(u);
+   document.getElementById('balance').textContent = income.available.toLocaleString() + ' FC';
    document.getElementById('totalInvested').textContent = u.invested.toLocaleString() + ' FC';
    document.getElementById('topPhoneDisplay').textContent = u.phone || '--';
    document.getElementById('profilePhone').textContent = u.phone || '--';
@@ -2295,8 +2375,9 @@ u.transactions.unshift({
    }
 
    let u = getUserData();
-   if(u.balance < amount){
-    alert('Solde insuffisant pour honorer ce retrait.');
+   const availableIncome = calculateAvailableIncome(u).available;
+   if(availableIncome < amount){
+    alert('Solde disponible insuffisant. Le retrait utilise uniquement vos revenus d’équipe et vos revenus des produits.');
     return;
    }
 
