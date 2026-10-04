@@ -1440,11 +1440,20 @@ button:disabled{cursor:not-allowed}
           if(typeof logout === 'function') logout();
           return;
         }
+        const before = getUserData();
         localStorage.setItem('investRdcUser', JSON.stringify(fresh));
         try{
           await syncApprovedDeposits();
           checkDailyEarnings();
           updateDashboardUI();
+          const beforeTx = Array.isArray(before.transactions)?before.transactions.length:0;
+          const afterTx = Array.isArray(fresh.transactions)?fresh.transactions.length:0;
+          if(afterTx>beforeTx){
+            const latest = fresh.transactions?.[0];
+            if(latest?.status === 'Approuvé' && latest?.type?.toLowerCase().includes('dépôt')){
+              console.info('Dépôt approuvé par l’administration.');
+            }
+          }
         }catch(e){ console.error('Synchronisation utilisateur:', e); }
       });
     }catch(e){ console.error('Realtime Firebase:', e); }
@@ -2119,6 +2128,12 @@ button:disabled{cursor:not-allowed}
 
       // Revenus produits : gains quotidiens uniquement.
       if(type.includes('gain quotidien')){
+        if(tx.status !== 'Rejeté') productIncome += amount;
+        return;
+      }
+
+      // Bonus réclamé : il devient disponible dans le solde utilisable.
+      if(type.includes('bonus de bienvenue')){
         if(tx.status !== 'Rejeté') productIncome += amount;
       }
     });
